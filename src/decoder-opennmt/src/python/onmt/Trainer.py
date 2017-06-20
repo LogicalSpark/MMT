@@ -8,11 +8,40 @@ from torch.autograd import Variable
 
 import onmt
 import logging
+import os
+import subprocess
 
+def checkBleuTrend(bleuDev, history, threshold):
+    historyAverage = 0.0
+
+    actualEpoch = len(bleuDev)
+
+    # return False if the number of epochs is not larger than history
+    if actualEpoch <= history:
+        return False
+
+    for epoch in range(history):
+        historyAverage += bleuDev[actualEpoch - epoch - 2]
+    historyAverage /= history
+
+    # return True if the last bleuDev is smaller than
+    # a given threshold with respect to the average
+    # of the previous history values is
+    if bleuDev[actualEpoch-1] < (1.0 - threshold) * historyAverage:
+        return True
+
+    return False
 
 class Trainer(object):
     def __init__(self, opt):
         self.opt = opt
+
+        self.terminate = False  #termination flag
+        self.bleuDev = []
+        self.minimumBleuIncrement = 0.1
+        self.minimumEpochs = 3
+        self.bleuScore = "mmt-bleu.perl"
+
         # print 'Trainer::Trainer opt:', repr(opt)
 
         self._logger = logging.getLogger('onmt.Trainer')
@@ -72,9 +101,12 @@ class Trainer(object):
 
     def trainModel(self, model_ori, trainData, validData, dataset, optim_ori, save_all_epochs=True, save_last_epoch=False, epochs=None, clone=False):
 
-#        self._logger.info('def Trainer::trainModel trainData:%s' % repr(trainData))
+       # self._logger.info('def Trainer::trainModel trainData:%s' % repr(trainData))
 
         opt=self.opt
+
+        #At the beginning of the training, set the termination flag to False
+        self.terminate = False
 
         if epochs:
             opt.epochs = epochs
@@ -110,7 +142,7 @@ class Trainer(object):
                 batchIdx = batchOrder[i] if epoch > opt.curriculum else i
                 batch = trainData[batchIdx][:-1] # exclude original indices
         
-#                self._logger.info('def Trainer::trainEpoch batch:%s' % repr(batch))
+                # self._logger.info('def Trainer::trainEpoch batch:%s' % repr(batch))
 
                 model.zero_grad()
                 outputs = model(batch)
@@ -124,6 +156,8 @@ class Trainer(object):
                 optim.step()
 
                 num_words = targets.data.ne(onmt.Constants.PAD).sum()
+                # self._logger.info('def Trainer::trainEpoch targets.data:%s' % repr(targets.data))
+                # self._logger.info('def Trainer::trainEpoch batch[0][1].data:%s' % repr(batch[0][1].data))
                 report_loss += loss
                 report_num_correct += num_correct
                 report_tgt_words += num_words
@@ -211,6 +245,73 @@ class Trainer(object):
 
 
             self._logger.info('Training epoch %g... END %.2fs' % (epoch, time.time() - start_time_epoch))
+
+            if validData:
+                # if the development setvalidation Set is provided
+                # compute bleuScore on the validation set for the last epoch
+
+                # write hypotheses and references to files
+                hypFilepath = self.opt.tmp_path + "/hyp_epoch" + str(epoch)
+                hypF = open(hypFilepath, "w")
+
+                refFilepath = self.opt.tmp_path + "/ref_epoch" + str(epoch)
+                refF = open(refFilepath, "w")
+
+                for i in range(len(validData)):
+
+                    hypCodes, refCodes = [], []
+
+                    h=validData[i][0][0].data.transpose(0,1)
+                    for j in range(h.size(0)):
+                        hypCodes.append(h[j].tolist())
+
+                    r=validData[i][1].data.transpose(0,1)
+                    for j in range(r.size(0)):
+                        refCodes.append(r[j].tolist())
+
+
+                    hypWords, refWords = [], []
+                    for j in range(len(hypCodes)):
+                        hypCodes[j] = [x for x in hypCodes[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
+                        hypWords.append(dataset['dicts']['tgt'].convertToLabels(hypCodes[j], onmt.Constants.PAD))
+
+                    for j in range(len(refCodes)):
+                        refCodes[j] = [x for x in refCodes[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
+                        refWords.append(dataset['dicts']['tgt'].convertToLabels(refCodes[j], onmt.Constants.PAD))
+
+                    for j in range(len(hypWords)):
+                        hypF.write(" ".join(hypWords[j])+'\n')
+
+                    for j in range(len(refWords)):
+                        refF.write(" ".join(refWords[j])+'\n')
+
+                hypF.close()
+                refF.close()
+
+                hypF = open(hypFilepath,'r')
+                bleuFilepath = self.opt.tmp_path + "/bleu_epoch" + str(epoch)
+                bleuF = open(bleuFilepath,'w')
+                FNULL = open(os.devnull, 'w')
+
+                # run a process to compute BLEU score
+                cmd = ["perl",self.bleuScore, refFilepath]
+                process = subprocess.Popen(cmd, stdin=hypF, stdout=bleuF, stderr=FNULL)
+                process.wait()
+                bleuF.flush()
+                bleuF.close()
+
+                bleuF = open(bleuFilepath, 'r')
+                bleu = bleuF.readline().split(' ')
+                bleuF.close()
+
+                self.bleuDev.append(float(bleu[0]))
+
+                # check if training should continue or not
+                self.terminate = checkBleuTrend(self.bleuDev, self.minimumEpochs, self.minimumBleuIncrement)
+
+                if self.terminate == True:
+                    self._logger.info('Training is ended because the termination condition has been fired; use model at epoch %d' % (epoch - 1))
+                    break
 
         #
         # print 'def Trainer::trainModel END generator:', repr(generator_state_dict)

@@ -122,6 +122,8 @@ parser.add_argument('-log_interval', type=int, default=50,
 parser.add_argument('-seed',       type=int, default=3435,
                     help="Random seed for generating random numbers (-1 for un-defined the seed; default is 3435); ")
 
+parser.add_argument('-tmp_path', default='/tmp/', type=str,
+                    help="""Temporary directory""")
 
 def main():
     opt = parser.parse_args()

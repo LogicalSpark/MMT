@@ -70,7 +70,7 @@ class Translator(object):
 
     def create(self, checkpoint):
         torch.manual_seed(self.opt.seed)
-        random.manual_seed_all(self.opt.seed)
+        # random.manual_seed_all(self.opt.seed)
 
         self.model_opt = checkpoint['opt']
         self._logger.info("Model Options:" + repr(self.model_opt))
@@ -154,8 +154,8 @@ class Translator(object):
         return dicts, model, optim
 
     def load(self, checkpoint, model, optim):
-	torch.manual_seed(self.opt.seed)
-	random.manual_seed_all(self.opt.seed)
+        torch.manual_seed(self.opt.seed)
+        # random.manual_seed_all(self.opt.seed)
 
         self._logger.info("loading model from checkpoint... START")
         start_time2 = time.time()
@@ -272,8 +272,7 @@ class Translator(object):
             mask(padMask)
             initOutput = model.make_init_decoder_output(context)
 
-            decOut, decStates, attn = model.decoder(
-                tgtBatch[:-1], decStates, context, initOutput)
+            decOut, decStates, attn = model.decoder(tgtBatch[:-1], decStates, context, initOutput)
             for dec_t, tgt_t in zip(decOut, tgtBatch[1:].data):
                 gen_t = model.generator.forward(dec_t)
                 tgt_t = tgt_t.unsqueeze(1)
