@@ -1863,17 +1863,23 @@ sub checkBleuTrend {
     my ($n, @bleus) = @_;
     my $histLen = 3;
     for (my $i=0; $i<$n; $i++) {
-	printf "BLEU on DEV at run %d: <%s>\n", $i+1, $bleus[$i];
+	    printf "BLEU on DEV at run %d: <%s>\n", $i+1, $bleus[$i];
     }
     my $avgHist=0.0; my $actualHistLen = 0;
     for (my $i=($n-1-$histLen>=0)?$n-1-$histLen:0; $i<$n-1; $i++) {
-	$avgHist+=$bleus[$i]; $actualHistLen++;
+	    $avgHist+=$bleus[$i]; $actualHistLen++;
     }
     if ($actualHistLen>=$histLen) {
-	$avgHist/=$actualHistLen ;
-	printf "average on last %d values: avg = %f\n", $actualHistLen, $avgHist;
-	printf "comparison %f vs. %f\n", $bleus[$n-1], (1+$minimum_required_increase_in_bleu/100)*$avgHist;
-	return ($bleus[$n-1]<=(1+$minimum_required_increase_in_bleu/100)*$avgHist);
+	    $avgHist/=$actualHistLen ;
+	    printf "average on last %d values: avg = %f\n", $actualHistLen, $avgHist;
+        if ($avgHist > 0.0){
+	        printf "comparison %f vs. %f\n", $bleus[$n-1], (1+$minimum_required_increase_in_bleu/100)*$avgHist;
+	        return ($bleus[$n-1]<=(1+$minimum_required_increase_in_bleu/100)*$avgHist);
+	    }
+	    else{
+	        printf "average on last %d values is still 0, continue\n", $actualHistLen;
+	        return 0;
+        }
     } else {
 	printf "not enough history\n";
 	return 0;
