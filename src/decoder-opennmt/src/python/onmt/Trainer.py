@@ -12,6 +12,10 @@ import os
 import subprocess
 
 def checkBleuTrend(bleuDev, history, threshold):
+
+    logger = logging.getLogger('onmt.checkBleuTrend')
+    logger.info('checkBleuTrend')
+
     historyAverage = 0.0
 
     actualEpoch = len(bleuDev)
@@ -24,10 +28,14 @@ def checkBleuTrend(bleuDev, history, threshold):
         historyAverage += bleuDev[actualEpoch - epoch - 2]
     historyAverage /= history
 
+    # return False if the average of the previous history values is 0.0
+    if historyAverage <= 0.0:
+        return False
+
     # return True if the last bleuDev is smaller than
     # a given threshold with respect to the average
     # of the previous history values is
-    if bleuDev[actualEpoch-1] < (1.0 - threshold) * historyAverage:
+    if bleuDev[actualEpoch-1] <= (1.0 + float(threshold) / 100) * historyAverage:
         return True
 
     return False
@@ -38,7 +46,7 @@ class Trainer(object):
 
         self.terminate = False  #termination flag
         self.bleuDev = []
-        self.minimumBleuIncrement = 0.1
+        self.minimumBleuIncrement = 10
         self.minimumEpochs = 3
         self.bleuScore = "mmt-bleu.perl"
 
@@ -56,21 +64,36 @@ class Trainer(object):
             crit.cuda()
         return crit
 
-    def memoryEfficientLoss(self,outputs, targets, generator, crit, eval=False):
+    def memoryEfficientLoss(self, outputs, targets, generator, crit, eval=False):
         opt=self.opt
         # compute generations one piece at a time
         num_correct, loss = 0, 0
         outputs = Variable(outputs.data, requires_grad=(not eval), volatile=eval)
 
+        sentence_size = outputs.size(0)
         batch_size = outputs.size(1)
+
         outputs_split = torch.split(outputs, opt.max_generator_batches)
         targets_split = torch.split(targets, opt.max_generator_batches)
+
+        validPredictions = torch.IntTensor(sentence_size,batch_size)
 
         for i, (out_t, targ_t) in enumerate(zip(outputs_split, targets_split)):
             out_t = out_t.view(-1, out_t.size(2))
             scores_t = generator(out_t)
             loss_t = crit(scores_t, targ_t.view(-1))
             pred_t = scores_t.max(1)[1]
+
+            # self._logger.info("def Trainer::memoryEfficientLoss i:%d repr(targ_t.data.tolist()):%s" % (i, repr(targ_t.data.tolist())))
+
+
+            for h in range(sentence_size):
+                for k in range(batch_size):
+                    idx = h * batch_size + k
+                    validPredictions[h][k] = pred_t.data[idx][0]
+
+            # self._logger.info("def Trainer::memoryEfficientLoss validPredictions.tolist():%s" % (repr(validPredictions.tolist())))
+
             num_correct_t = pred_t.data.eq(targ_t.data).masked_select(targ_t.ne(onmt.Constants.PAD).data).sum()
             num_correct += num_correct_t
             loss += loss_t.data[0]
@@ -78,7 +101,7 @@ class Trainer(object):
                 loss_t.div(batch_size).backward()
 
         grad_output = None if outputs.grad is None else outputs.grad.data
-        return loss, grad_output, num_correct
+        return loss, grad_output, num_correct, validPredictions.transpose(0,1)
 
     def eval(self, model, criterion, data):
         total_loss = 0
@@ -88,20 +111,19 @@ class Trainer(object):
         model.eval()
         for i in range(len(data)):
             batch = data[i][:-1] # exclude original indices
+
             outputs = model(batch)
             targets = batch[1][1:]  # exclude <s> from targets
-            loss, _, num_correct = self.memoryEfficientLoss(
-                outputs, targets, model.generator, criterion, eval=True)
+            loss, _, num_correct, hypotheses = self.memoryEfficientLoss(outputs, targets, model.generator, criterion, eval=True)
+            references = targets.data.transpose(0,1)
             total_loss += loss
             total_num_correct += num_correct
             total_words += targets.data.ne(onmt.Constants.PAD).sum()
 
         model.train()
-        return total_loss / total_words, float(total_num_correct) / total_words
+        return total_loss / total_words, float(total_num_correct) / total_words, hypotheses, references
 
-    def trainModel(self, model_ori, trainData, validData, dataset, optim_ori, save_all_epochs=True, save_last_epoch=False, epochs=None, clone=False):
-
-       # self._logger.info('def Trainer::trainModel trainData:%s' % repr(trainData))
+    def trainModel(self, model_ori, trainData, validData, dataset, optim_ori, working_dir, save_all_epochs=True, save_last_epoch=False, epochs=None, clone=False):
 
         opt=self.opt
 
@@ -147,7 +169,7 @@ class Trainer(object):
                 model.zero_grad()
                 outputs = model(batch)
                 targets = batch[1][1:]  # exclude <s> from targets
-                loss, gradOutput, num_correct = self.memoryEfficientLoss(
+                loss, gradOutput, num_correct, _ = self.memoryEfficientLoss(
                     outputs, targets, model.generator, criterion)
 
                 outputs.backward(gradOutput)
@@ -156,8 +178,7 @@ class Trainer(object):
                 optim.step()
 
                 num_words = targets.data.ne(onmt.Constants.PAD).sum()
-                # self._logger.info('def Trainer::trainEpoch targets.data:%s' % repr(targets.data))
-                # self._logger.info('def Trainer::trainEpoch batch[0][1].data:%s' % repr(batch[0][1].data))
+
                 report_loss += loss
                 report_num_correct += num_correct
                 report_tgt_words += num_words
@@ -195,7 +216,12 @@ class Trainer(object):
 
             if validData:
                 #  (2) evaluate on the validation set
-                valid_loss, valid_acc = self.eval(model, criterion, validData)
+                valid_loss, valid_acc, hypotheses, references = self.eval(model, criterion, validData)
+
+                # self._logger.info('def Trainer::trainEpoch hypotheses.tolist():%s' % repr(hypotheses.tolist()))
+                # self._logger.info('def Trainer::trainEpoch references.tolist():%s' % repr(references.tolist()))
+
+
                 valid_ppl = math.exp(min(valid_loss, 100))
                 self._logger.info('trainModel Epoch %g Validation loss: %g perplexity: %g accuracy: %g' % (epoch, valid_loss,valid_ppl,(float(valid_acc)*100)))
 
@@ -251,45 +277,36 @@ class Trainer(object):
                 # compute bleuScore on the validation set for the last epoch
 
                 # write hypotheses and references to files
-                hypFilepath = self.opt.tmp_path + "/hyp_epoch" + str(epoch)
-                hypF = open(hypFilepath, "w")
 
-                refFilepath = self.opt.tmp_path + "/ref_epoch" + str(epoch)
+                hypFilepath = os.path.join(working_dir, 'hyp_epoch' + str(epoch))
+                refFilepath = os.path.join(working_dir, 'ref_epoch' + str(epoch))
+                bleuFilepath = os.path.join(working_dir, 'bleu_epoch' + str(epoch))
+
+                hypF = open(hypFilepath, "w")
                 refF = open(refFilepath, "w")
 
+
+                self._logger.info('Computing BLEU epoch %g... START' % epoch)
+                start_time2_epoch = time.time()
                 for i in range(len(validData)):
 
-                    hypCodes, refCodes = [], []
-
-                    h=validData[i][0][0].data.transpose(0,1)
-                    for j in range(h.size(0)):
-                        hypCodes.append(h[j].tolist())
-
-                    r=validData[i][1].data.transpose(0,1)
-                    for j in range(r.size(0)):
-                        refCodes.append(r[j].tolist())
-
-
-                    hypWords, refWords = [], []
+                    hypCodes = [x.tolist() for x in hypotheses]
+                    refCodes = [x.tolist() for x in references]
                     for j in range(len(hypCodes)):
-                        hypCodes[j] = [x for x in hypCodes[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
-                        hypWords.append(dataset['dicts']['tgt'].convertToLabels(hypCodes[j], onmt.Constants.PAD))
+                        # codes = [str(x) for x in hypCodes[j]]
+                        codes = [str(x) for x in hypCodes[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
+                        # codes = [str(x) for x in refCodes[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
+                        hypF.write(" ".join(codes)+'\n')
 
                     for j in range(len(refCodes)):
-                        refCodes[j] = [x for x in refCodes[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
-                        refWords.append(dataset['dicts']['tgt'].convertToLabels(refCodes[j], onmt.Constants.PAD))
-
-                    for j in range(len(hypWords)):
-                        hypF.write(" ".join(hypWords[j])+'\n')
-
-                    for j in range(len(refWords)):
-                        refF.write(" ".join(refWords[j])+'\n')
+                        # codes = [str(x) for x in refCodes[j]]
+                        codes = [str(x) for x in refCodes[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
+                        refF.write(" ".join(codes)+'\n')
 
                 hypF.close()
                 refF.close()
 
                 hypF = open(hypFilepath,'r')
-                bleuFilepath = self.opt.tmp_path + "/bleu_epoch" + str(epoch)
                 bleuF = open(bleuFilepath,'w')
                 FNULL = open(os.devnull, 'w')
 
@@ -298,14 +315,18 @@ class Trainer(object):
                 process = subprocess.Popen(cmd, stdin=hypF, stdout=bleuF, stderr=FNULL)
                 process.wait()
                 bleuF.flush()
+                bleuF.write('\n')
                 bleuF.close()
+                self._logger.info('cmd: %s' % repr(cmd))
 
                 bleuF = open(bleuFilepath, 'r')
                 bleu = bleuF.readline().split(' ')
+                self.bleuDev.append(float(bleu[0]))
                 bleuF.close()
 
-                self.bleuDev.append(float(bleu[0]))
+                self._logger.info('BLEU on the validation set: %s' % str(bleu[0]))
 
+                self._logger.info('Computing BLEU epoch %g... END %.2fs' % (epoch, time.time() - start_time2_epoch))
                 # check if training should continue or not
                 self.terminate = checkBleuTrend(self.bleuDev, self.minimumEpochs, self.minimumBleuIncrement)
 
@@ -313,32 +334,10 @@ class Trainer(object):
                     self._logger.info('Training is ended because the termination condition has been fired; use model at epoch %d' % (epoch - 1))
                     break
 
-        #
-        # print 'def Trainer::trainModel END generator:', repr(generator_state_dict)
-        # for name, param in sorted(generator_state_dict.items()):
-        #         print ('def Trainer::trainModel END generator_state_dict name',name)
-        #         print ('def Trainer::trainModel END generator_state_dict own_state[name]',generator_state_dict[name])
-        #
-        # print 'def Trainer::trainModel END model_state_dict:', repr(model_state_dict)
-        # for name, param in sorted(model_state_dict.items()):
-        #         print ('def Trainer::trainModel END model_state_dict name',name)
-        #         print ('def Trainer::trainModel END model_state_dict own_state[name]',model_state_dict[name])
 
-
-#        model_state_dict = model.module.state_dict() if len(opt.gpus) > 1 else model.state_dict()
-#        model_state_dict = {k: v for k, v in model_state_dict.items() if 'generator' not in k}
-#        generator_state_dict = model.generator.module.state_dict() if len(opt.gpus) > 1 else model.generator.state_dict()
-
-        #  (4) drop a checkpoint
-#        checkpoint = {
-#                    'model': model_state_dict,
-#                    'generator': generator_state_dict,
-#                    'dicts': dataset['dicts'],
-#                    'opt': opt,
-#                    'epoch': epoch,
-#                    'optim': optim
-#                }
-
-        # self._logger.debug('trainModel returning checkpoint.generator: %s' % (repr(checkpoint['generator'])))
-#        self._logger.debug('trainModel returning generator_state_dict: %s' % (repr(generator_state_dict)))
+        # return the previous last epoch if the termination condition has been fired; the last epoch otherwise
+        if self.terminate:
+            return epoch - 1
+        else:
+            return epoch
 

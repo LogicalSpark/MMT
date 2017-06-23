@@ -259,7 +259,9 @@ def main():
     logger.info('Training model... START')
     start_time = time.time()
     trainer = Trainer(opt)
-    trainer.trainModel(model, trainData, validData,  dataset, optim)
+    working_dir = "/tmp"
+    last_epoch = trainer.trainModel(model, trainData, validData,  dataset, optim, working_dir)
+    logger.info('Training model... epoch to use: %s' % last_epoch)
     logger.info('Training model... END %.2fs' % (time.time() - start_time))
 
 if __name__ == "__main__":

@@ -407,7 +407,7 @@ class Translator(object):
 
         return predBatch, predScore, goldScore
 
-    def translateWithAdaptation(self, srcBatch, goldBatch, suggestions):
+    def translateWithAdaptation(self, srcBatch, goldBatch, suggestions, working_dir="/tmp"):
         self._logger.info('def Translator::translateWithAdaptation translating with tuning')
 
         #  (1) convert words to indexes [input and reference (if nay)]
@@ -459,8 +459,7 @@ class Translator(object):
 
         self._logger.info('tuning model... START')
         start_time = time.time()
-        # self.trainer.trainModel(model_copy, tuningTrainData, None, tuningDataset, optim_copy, save_all_epochs=False, save_last_epoch=False, epochs=self.opt.tuning_epochs, clone=False)
-        self.trainer.trainModel(self.model_copy, tuningTrainData, None, tuningDataset, self.optim_copy, save_all_epochs=False, save_last_epoch=False, epochs=self.opt.tuning_epochs, clone=False)
+        self.trainer.trainModel(self.model_copy, tuningTrainData, None, tuningDataset, self.optim_copy, working_dir=working_dir, save_all_epochs=False, save_last_epoch=False, epochs=self.opt.tuning_epochs, clone=False)
         self._logger.info('tuning model... END %.2fs' % (time.time() - start_time))
 
 #        generator_copy_state_dict = model_copy.generator.module.state_dict() if len(self.opt.gpus) > 1 else model_copy.generator.state_dict()
