@@ -197,10 +197,13 @@ if ($length_reference==0){
   exit(1);
 }
 
-if ($length_translation<$length_reference) {
+if ($length_translation == 0) {
+  $brevity_penalty = 0.0
+} elsif ($length_translation<$length_reference) {
   $brevity_penalty = exp(1-$length_reference/$length_translation);
 }
-$bleu = $brevity_penalty * exp((my_log( $bleu[1] ) +
+$bleu = $brevity_penalty * exp((
+                my_log( $bleu[1] ) +
 				my_log( $bleu[2] ) +
 				my_log( $bleu[3] ) +
 				my_log( $bleu[4] ) ) / 4) ;
