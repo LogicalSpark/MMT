@@ -230,7 +230,7 @@ class OpenNMTDecoder:
         try:
             start_time = time.time()
             trainer = onmt.Trainer(self._opts)
-            trainer.trainModel(model, train_data, valid_data, data_set, optim)
+            trainer.trainModel(model, train_data, valid_data, data_set, optim, working_dir)
             logger.info('Training model... END %.2fs' % (time.time() - start_time))
         except KeyboardInterrupt:
             logger.info('Training model... INTERRUPTED %.2fs' % (time.time() - start_time))
