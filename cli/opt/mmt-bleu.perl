@@ -10,18 +10,25 @@ my $lowercase = 0; # by default, the casing of hyp and refs is kept as it is
 my $tokenization = 1; # by default, hyp and refs are tokenized
 my $stem = ();
 my $HELP = 0;
+my $order = 4;
 
 while (@ARGV) {
-        $_ = shift;
-        /^[^-]/   && ($stem=$_, last);            # file of references
-        /^-lc$/   && ($lowercase = 1, next);      # lowercasing hyp and refs
-        /^-nt$/   && ($tokenization = 0, next);   # hyp and refs are not tokenized
-        /^-h/     && ($HELP = 1, last);
+        $_ = shift(@ARGV);
+        /^[^-]/     && ($stem=$_, last);            # file of references
+        /^-lc$/     && ($lowercase = 1, next);      # lowercasing hyp and refs
+        /^-nt$/     && ($tokenization = 0, next);   # hyp and refs are not tokenized
+        /^-order$/  && ($order = shift(@ARGV), next);       # order of the ngram for BELU (default=4)
+        /^-h/       && ($HELP = 1, last);
 }
 
 if (!defined $stem || $HELP) {
-  print STDERR "usage: mmt-bleu.pl [-lc] [-nt] reference < hypothesis\n";
+  print STDERR "usage: mmt-bleu.pl [-lc] [-nt] [-order INT] reference < hypothesis\n";
   print STDERR "Reads the references from reference or reference0, reference1, ...\n";
+  exit(1);
+}
+
+if ($order == 0){
+  print STDERR "The order of the bleu score should be larger than 0\n";
   exit(1);
 }
 
@@ -101,6 +108,9 @@ sub add_to_ref {
 }
 
 my(@CORRECT,@TOTAL,$length_translation,$length_reference);
+
+for(my $n=1;$n<=$order;$n++) { $CORRECT[$n] = $TOTAL[$n] = 0; }
+
 my $s=0;
 while(<STDIN>) {
     chop;
@@ -125,7 +135,7 @@ while(<STDIN>) {
             # from two references with the same closeness to me
             # take the *shorter* into account, not the "first" one.
         }
-	for(my $n=1;$n<=4;$n++) {
+	for(my $n=1;$n<=$order;$n++) {
 	    my %REF_NGRAM_N = ();
 	    for(my $start=0;$start<=$#WORD-($n-1);$start++) {
 		my $ngram = "$n";
@@ -145,7 +155,7 @@ while(<STDIN>) {
     }
     $length_translation += $length_translation_this_sentence;
     $length_reference += $closest_length;
-    for(my $n=1;$n<=4;$n++) {
+    for(my $n=1;$n<=$order;$n++) {
 	my %T_NGRAM = ();
 	for(my $start=0;$start<=$#WORD-($n-1);$start++) {
 	    my $ngram = "$n";
@@ -183,10 +193,9 @@ my $bleu = 0;
 
 my @bleu=();
 
-for(my $n=1;$n<=4;$n++) {
+for(my $n=1;$n<=$order;$n++) {
   if (defined ($TOTAL[$n])){
     $bleu[$n]=($TOTAL[$n])?$CORRECT[$n]/$TOTAL[$n]:0;
-    # print STDERR "CORRECT[$n]:$CORRECT[$n] TOTAL[$n]:$TOTAL[$n]\n";
   }else{
     $bleu[$n]=0;
   }
@@ -202,19 +211,22 @@ if ($length_translation == 0) {
 } elsif ($length_translation<$length_reference) {
   $brevity_penalty = exp(1-$length_reference/$length_translation);
 }
-$bleu = $brevity_penalty * exp((
-                my_log( $bleu[1] ) +
-				my_log( $bleu[2] ) +
-				my_log( $bleu[3] ) +
-				my_log( $bleu[4] ) ) / 4) ;
+
+my $sumPrec = 0;
+for(my $n=1;$n<=$order;$n++) { $sumPrec += my_log( $bleu[$n] ); }
+$bleu = $brevity_penalty * exp( $sumPrec ) ;
 
 printf "%f", $bleu;
-printf STDERR "BLEU = %.2f, %.1f/%.1f/%.1f/%.1f (BP=%.3f, ratio=%.3f, hyp_len=%d, ref_len=%d)\n",
+my $strPrec = "";
+
+for(my $n=1;$n<=$order;$n++) {
+    $strPrec .= sprintf "%.1f", 100*$bleu[$n];
+    $strPrec .= sprintf "/" if $n < $order;
+}
+
+printf STDERR "BLEU = %.2f, %s (BP=%.3f, ratio=%.3f, hyp_len=%d, ref_len=%d)\n",
     100*$bleu,
-    100*$bleu[1],
-    100*$bleu[2],
-    100*$bleu[3],
-    100*$bleu[4],
+    $strPrec,
     $brevity_penalty,
     $length_translation / $length_reference,
     $length_translation,
