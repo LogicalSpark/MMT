@@ -12,18 +12,13 @@ import os
 import subprocess
 
 def checkBleuTrend(bleuDev, history, threshold):
-
-    logger = logging.getLogger('onmt.checkBleuTrend')
-    logger.info('checkBleuTrend')
-
-    historyAverage = 0.0
-
     actualEpoch = len(bleuDev)
 
     # return False if the number of epochs is not larger than history
     if actualEpoch <= history:
         return False
 
+    historyAverage = 0.0
     for epoch in range(history):
         historyAverage += bleuDev[actualEpoch - epoch - 2]
     historyAverage /= history
@@ -32,10 +27,11 @@ def checkBleuTrend(bleuDev, history, threshold):
     if historyAverage <= 0.0:
         return False
 
-    # return True if the last bleuDev is smaller than
-    # a given threshold with respect to the average
-    # of the previous history values is
+    # return True if the last bleuDev is smaller than a given threshold
+    # with respect to the average of the previous history values is
     if bleuDev[actualEpoch-1] <= (1.0 + float(threshold) / 100) * historyAverage:
+        logger = logging.getLogger('onmt.Trainer')
+        logger.debug('Stop training because BELU score does not increase ebough with respect to last %d iterations' % (history))
         return True
 
     return False
@@ -104,20 +100,14 @@ class Trainer(object):
         self._logger.info('Training Options:%s' % self.opt)
 
     def NMTCriterion(self, vocabSize):
-        opt = self.opt
         weight = torch.ones(vocabSize)
         weight[onmt.Constants.PAD] = 0
         crit = nn.NLLLoss(weight, size_average=False)
-        if opt.gpus:
+        if self.opt.gpus:
             crit.cuda()
         return crit
 
     def memoryEfficientLoss(self, outputs, targets, generator, crit, eval=False):
-<<<<<<< HEAD
-        opt=self.opt
-=======
-        opt = self.opt
->>>>>>> features/neural_decoder
         # compute generations one piece at a time
         num_correct, loss = 0, 0
         outputs = Variable(outputs.data, requires_grad=(not eval), volatile=eval)
@@ -125,8 +115,8 @@ class Trainer(object):
         sentence_size = outputs.size(0)
         batch_size = outputs.size(1)
 
-        outputs_split = torch.split(outputs, opt.max_generator_batches)
-        targets_split = torch.split(targets, opt.max_generator_batches)
+        outputs_split = torch.split(outputs, self.opt.max_generator_batches)
+        targets_split = torch.split(targets, self.opt.max_generator_batches)
 
         validPredictions = torch.IntTensor(sentence_size,batch_size)
 
@@ -136,15 +126,11 @@ class Trainer(object):
             loss_t = crit(scores_t, targ_t.view(-1))
             pred_t = scores_t.max(1)[1]
 
-            # self._logger.info("def Trainer::memoryEfficientLoss i:%d repr(targ_t.data.tolist()):%s" % (i, repr(targ_t.data.tolist())))
-
-
-            for h in range(sentence_size):
-                for k in range(batch_size):
-                    idx = h * batch_size + k
-                    validPredictions[h][k] = pred_t.data[idx][0]
-
-            # self._logger.info("def Trainer::memoryEfficientLoss validPredictions.tolist():%s" % (repr(validPredictions.tolist())))
+            if eval:
+                for h in range(sentence_size):
+                    for k in range(batch_size):
+                        idx = h * batch_size + k
+                        validPredictions[h][k] = pred_t.data[idx][0]
 
             num_correct_t = pred_t.data.eq(targ_t.data).masked_select(targ_t.ne(onmt.Constants.PAD).data).sum()
             num_correct += num_correct_t
@@ -153,12 +139,18 @@ class Trainer(object):
                 loss_t.div(batch_size).backward()
 
         grad_output = None if outputs.grad is None else outputs.grad.data
-        return loss, grad_output, num_correct, validPredictions.transpose(0,1)
+        return loss, grad_output, num_correct, validPredictions.transpose(0,1).tolist()
 
     def eval(self, model, criterion, data):
         total_loss = 0
         total_words = 0
         total_num_correct = 0
+
+        self._logger = logging.getLogger('onmt.Trainer')
+        self._logger.info('def Trainer::eval')
+
+        hypotheses = []
+        references = []
 
         model.eval()
         for i in range(len(data)):
@@ -166,8 +158,13 @@ class Trainer(object):
 
             outputs = model(batch)
             targets = batch[1][1:]  # exclude <s> from targets
-            loss, _, num_correct, hypotheses = self.memoryEfficientLoss(outputs, targets, model.generator, criterion, eval=True)
-            references = targets.data.transpose(0,1)
+
+            loss, _, num_correct, _hyps = self.memoryEfficientLoss(outputs, targets, model.generator, criterion, eval=True)
+
+            for x in _hyps:
+                hypotheses.append(x)
+            for x in targets.data.transpose(0,1).tolist():
+                references.append(x)
             total_loss += loss
             total_num_correct += num_correct
             total_words += targets.data.ne(onmt.Constants.PAD).sum()
@@ -269,10 +266,6 @@ class Trainer(object):
                 #  (2) evaluate on the validation set
                 valid_loss, valid_acc, hypotheses, references = self.eval(model, criterion, validData)
 
-                # self._logger.info('def Trainer::trainEpoch hypotheses.tolist():%s' % repr(hypotheses.tolist()))
-                # self._logger.info('def Trainer::trainEpoch references.tolist():%s' % repr(references.tolist()))
-
-
                 valid_ppl = math.exp(min(valid_loss, 100))
                 self._logger.info('trainModel Epoch %g Validation loss: %g perplexity: %g accuracy: %g' % (
                     epoch, valid_loss, valid_ppl, (float(valid_acc) * 100)))
@@ -281,6 +274,57 @@ class Trainer(object):
                 optim.updateLearningRate(valid_loss, epoch)
 
                 self._logger.info("trainModel Epoch %g Decaying learning rate to %g" % (epoch, optim.lr))
+
+                # compute bleuScore on the validation set for the last epoch
+
+                # write hypotheses and references to files
+
+                hypFilepath = os.path.join(working_dir, 'hyp_epoch' + str(epoch))
+                refFilepath = os.path.join(working_dir, 'ref_epoch' + str(epoch))
+                bleuFilepath = os.path.join(working_dir, 'bleu_epoch' + str(epoch))
+
+                hypF = open(hypFilepath, "w")
+                refF = open(refFilepath, "w")
+
+                self._logger.info('Computing BLEU epoch %g... START' % epoch)
+                start_time2_epoch = time.time()
+
+                for j in range(len(hypotheses)):
+                    codes = [str(x) for x in hypotheses[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
+                    hypF.write(" ".join(codes)+'\n')
+                    
+                for j in range(len(references)):
+                    codes = [str(x) for x in references[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
+                    refF.write(" ".join(codes)+'\n')
+
+                hypF.close()
+                refF.close()
+
+                hypF = open(hypFilepath,'r')
+                bleuF = open(bleuFilepath,'w')
+                FNULL = open(os.devnull, 'w')
+
+                # run a process to compute BLEU score
+                process = subprocess.Popen(["perl",self.bleuScore, refFilepath], stdin=hypF, stdout=bleuF, stderr=FNULL)
+                process.wait()
+                bleuF.flush()
+                bleuF.write('\n')
+                bleuF.close()
+
+                bleuF = open(bleuFilepath, 'r')
+                bleu = bleuF.readline().split(' ')
+                self.bleuDev.append(float(bleu[0]))
+                bleuF.close()
+
+                self._logger.info('BLEU on the validation set: %s' % str(bleu[0]))
+
+                self._logger.info('Computing BLEU epoch %g... END %.2fs' % (epoch, time.time() - start_time2_epoch))
+                # check if training should continue or not
+                self.terminate = checkBleuTrend(self.bleuDev, self.minimumEpochs, self.minimumBleuIncrement)
+
+                if self.terminate == True:
+                    self._logger.info('Training is ended because the termination condition has been fired; use model at epoch %d' % (epoch - 1))
+                    break
 
             if save_all_epochs or save_last_epoch:
                 model_state_dict = model.module.state_dict() if len(opt.gpus) > 1 else model.state_dict()
@@ -307,69 +351,6 @@ class Trainer(object):
                     torch.save(checkpoint, '%s_acc_NA_ppl_NA_e%d.pt' % (opt.save_model, epoch))
 
             self._logger.info('Training epoch %g... END %.2fs' % (epoch, time.time() - start_time_epoch))
-
-            if validData:
-                # if the development setvalidation Set is provided
-                # compute bleuScore on the validation set for the last epoch
-
-                # write hypotheses and references to files
-
-                hypFilepath = os.path.join(working_dir, 'hyp_epoch' + str(epoch))
-                refFilepath = os.path.join(working_dir, 'ref_epoch' + str(epoch))
-                bleuFilepath = os.path.join(working_dir, 'bleu_epoch' + str(epoch))
-
-                hypF = open(hypFilepath, "w")
-                refF = open(refFilepath, "w")
-
-
-                self._logger.info('Computing BLEU epoch %g... START' % epoch)
-                start_time2_epoch = time.time()
-                for i in range(len(validData)):
-
-                    hypCodes = [x.tolist() for x in hypotheses]
-                    refCodes = [x.tolist() for x in references]
-                    for j in range(len(hypCodes)):
-                        # codes = [str(x) for x in hypCodes[j]]
-                        codes = [str(x) for x in hypCodes[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
-                        # codes = [str(x) for x in refCodes[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
-                        hypF.write(" ".join(codes)+'\n')
-
-                    for j in range(len(refCodes)):
-                        # codes = [str(x) for x in refCodes[j]]
-                        codes = [str(x) for x in refCodes[j] if x != onmt.Constants.BOS and x != onmt.Constants.EOS and x != onmt.Constants.PAD]
-                        refF.write(" ".join(codes)+'\n')
-
-                hypF.close()
-                refF.close()
-
-                hypF = open(hypFilepath,'r')
-                bleuF = open(bleuFilepath,'w')
-                FNULL = open(os.devnull, 'w')
-
-                # run a process to compute BLEU score
-                cmd = ["perl",self.bleuScore, refFilepath]
-                process = subprocess.Popen(cmd, stdin=hypF, stdout=bleuF, stderr=FNULL)
-                process.wait()
-                bleuF.flush()
-                bleuF.write('\n')
-                bleuF.close()
-                self._logger.info('cmd: %s' % repr(cmd))
-
-                bleuF = open(bleuFilepath, 'r')
-                bleu = bleuF.readline().split(' ')
-                self.bleuDev.append(float(bleu[0]))
-                bleuF.close()
-
-                self._logger.info('BLEU on the validation set: %s' % str(bleu[0]))
-
-                self._logger.info('Computing BLEU epoch %g... END %.2fs' % (epoch, time.time() - start_time2_epoch))
-                # check if training should continue or not
-                self.terminate = checkBleuTrend(self.bleuDev, self.minimumEpochs, self.minimumBleuIncrement)
-
-                if self.terminate == True:
-                    self._logger.info('Training is ended because the termination condition has been fired; use model at epoch %d' % (epoch - 1))
-                    break
-
 
         # return the previous last epoch if the termination condition has been fired; the last epoch otherwise
         if self.terminate:
