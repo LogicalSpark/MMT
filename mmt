@@ -42,6 +42,9 @@ def __check_java():
                 if '"1.8' in tokens[tokens.index('version') + 1]:
                     ok = True
                     break
+                if '"9' in tokens[tokens.index('version') + 1]:
+                    ok = True
+                    break
         if not ok:
             print 'ERROR: Wrong version of Java, required Java 8'
             exit(1)
