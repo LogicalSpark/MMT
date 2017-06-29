@@ -41,6 +41,7 @@ while(-e "$stem$ref") {
     $ref++;
 }
 &add_to_ref($stem,\@REF) if -e $stem;
+$ref++;
 die("ERROR: could not find reference file $stem") unless scalar @REF;
 
 # add additional references explicitly specified on the command line
@@ -60,8 +61,7 @@ sub tokenization_international {
     push @tags, $&;
     $norm_text =~ s/\Q$&\E/" MTEVALXMLTAG".$i." "/e;
     $i++;
-        
-    }
+  }
 
   # replace entities
   $norm_text =~ s/&quot;/\"/g;  # quote to "
@@ -111,6 +111,7 @@ my(@CORRECT,@TOTAL,$length_translation,$length_reference);
 
 for(my $n=1;$n<=$order;$n++) { $CORRECT[$n] = $TOTAL[$n] = 0; }
 
+
 my $s=0;
 while(<STDIN>) {
     chop;
@@ -120,9 +121,9 @@ while(<STDIN>) {
     my %REF_NGRAM = ();
     my $length_translation_this_sentence = scalar(@WORD);
     my ($closest_diff,$closest_length) = (9999,9999);
+    die "The number of hypo sentences is larger than the number of reference sentences (".($s+1).",".(scalar(@REF)).")" if $s >= scalar(@REF);
     foreach my $reference (@{$REF[$s]}) {
-#   print "$s $_ <=> $reference\n";
-    $reference = lc($reference) if $lowercase;
+        $reference = lc($reference) if $lowercase;
 	my @WORD = split(' ',$reference);
 	my $length = scalar(@WORD);
         my $diff = abs($length_translation_this_sentence-$length);
@@ -202,18 +203,26 @@ for(my $n=1;$n<=$order;$n++) {
 }
 
 if ($length_reference==0){
-  printf "BLEU = 0, 0/0/0/0 (BP=0, ratio=0, hyp_len=0, ref_len=0)\n";
-  exit(1);
+  my $strPrec = "";
+  for(my $n=1;$n<=$order;$n++) {
+    $strPrec .= sprintf "0.0", 100*$bleu[$n];
+    $strPrec .= sprintf "/" if $n < $order;
+  }
+  printf "BLEU = 0.00, %s (BP=0.000, ratio=0.000, hyp_len=0, ref_len=0)\n", $strPrec;
+  exit(0);
 }
 
 if ($length_translation == 0) {
-  $brevity_penalty = 0.0
+  $brevity_penalty = 0.0;
 } elsif ($length_translation<$length_reference) {
   $brevity_penalty = exp(1-$length_reference/$length_translation);
 }
 
 my $sumPrec = 0;
-for(my $n=1;$n<=$order;$n++) { $sumPrec += my_log( $bleu[$n] ); }
+for(my $n=1;$n<=$order;$n++) {
+  $sumPrec += my_log( $bleu[$n] );
+}
+$sumPrec /= $order;
 $bleu = $brevity_penalty * exp( $sumPrec ) ;
 
 printf "%f", $bleu;
