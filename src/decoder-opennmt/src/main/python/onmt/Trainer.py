@@ -12,6 +12,7 @@ import os
 import subprocess
 
 def checkBleuTrend(bleuDev, history, threshold):
+    logger = logging.getLogger('onmt.Trainer')
     actualEpoch = len(bleuDev)
 
     # return False if the number of epochs is not larger than history
@@ -20,8 +21,9 @@ def checkBleuTrend(bleuDev, history, threshold):
 
     historyAverage = 0.0
     for epoch in range(history):
-        historyAverage += bleuDev[actualEpoch - epoch - 2]
+        historyAverage += bleuDev[actualEpoch - 2 - epoch]
     historyAverage /= history
+    logger.debug('actual epoch = %s, BLEU of actual epoch = %s    vs.   BLEU of history = %s   with threshold is (%g%%)' % (actualEpoch, bleuDev[actualEpoch - 1], historyAverage, threshold))
 
     # return False if the average of the previous history values is 0.0
     if historyAverage <= 0.0:
@@ -29,9 +31,8 @@ def checkBleuTrend(bleuDev, history, threshold):
 
     # return True if the last bleuDev is smaller than a given threshold
     # with respect to the average of the previous history values is
-    if bleuDev[actualEpoch-1] <= (1.0 + float(threshold) / 100) * historyAverage:
-        logger = logging.getLogger('onmt.Trainer')
-        logger.debug('Stop training because BELU score does not increase ebough with respect to last %d iterations' % (history))
+    if bleuDev[actualEpoch - 1] <= (1.0 + float(threshold) / 100) * historyAverage:
+        logger.debug('Stop training because BLEU score does not increase enough (%g%%) with respect to last %d iterations' % (threshold, history))
         return True
 
     return False
@@ -92,8 +93,9 @@ class Trainer(object):
 
         self.terminate = False  #termination flag
         self.bleuDev = []
-        self.minimumBleuIncrement = 10
-        self.minimumEpochs = 3
+        self.minimumBleuIncrement = 5 # minimum BLEU increment required to continue training
+        self.minimumEpochs = 3 # minimum number of iterations before applying termination criterion
+        self.bleuOrder = 4 # order of ngrams in the computation of BLEU (default is 4)
         self.bleuScore = "mmt-bleu.perl"
 
         self._logger = logging.getLogger('onmt.Trainer')
@@ -118,36 +120,37 @@ class Trainer(object):
         outputs_split = torch.split(outputs, self.opt.max_generator_batches)
         targets_split = torch.split(targets, self.opt.max_generator_batches)
 
-        validPredictions = torch.IntTensor(sentence_size,batch_size)
+        validPredictions = torch.IntTensor(batch_size, sentence_size)
 
-        for i, (out_t, targ_t) in enumerate(zip(outputs_split, targets_split)):
+        hypotheses = []
+        for j, (out_t, targ_t) in enumerate(zip(outputs_split, targets_split)):
             out_t = out_t.view(-1, out_t.size(2))
             scores_t = generator(out_t)
             loss_t = crit(scores_t, targ_t.view(-1))
             pred_t = scores_t.max(1)[1]
-
-            if eval:
-                for h in range(sentence_size):
-                    for k in range(batch_size):
-                        idx = h * batch_size + k
-                        validPredictions[h][k] = pred_t.data[idx][0]
-
             num_correct_t = pred_t.data.eq(targ_t.data).masked_select(targ_t.ne(onmt.Constants.PAD).data).sum()
             num_correct += num_correct_t
             loss += loss_t.data[0]
+
             if not eval:
                 loss_t.div(batch_size).backward()
 
+            if eval:
+	        words_size = targ_t.data.size(0) 
+                for k in range(batch_size):
+                    for h in range(words_size):
+                        k_idx = k
+                        h_idx = j * words_size + h
+                        pred_idx = h * batch_size + k
+                        validPredictions[k_idx][h_idx] = pred_t.data[pred_idx][0]
+
         grad_output = None if outputs.grad is None else outputs.grad.data
-        return loss, grad_output, num_correct, validPredictions.transpose(0,1).tolist()
+        return loss, grad_output, num_correct, validPredictions.tolist()
 
     def eval(self, model, criterion, data):
         total_loss = 0
         total_words = 0
         total_num_correct = 0
-
-        self._logger = logging.getLogger('onmt.Trainer')
-        self._logger.info('def Trainer::eval')
 
         hypotheses = []
         references = []
@@ -277,11 +280,11 @@ class Trainer(object):
 
                 # compute bleuScore on the validation set for the last epoch
 
-                # write hypotheses and references to files
-
-                hypFilepath = os.path.join(working_dir, 'hyp_epoch' + str(epoch))
-                refFilepath = os.path.join(working_dir, 'ref_epoch' + str(epoch))
-                bleuFilepath = os.path.join(working_dir, 'bleu_epoch' + str(epoch))
+                # files where writing hypotheses, references and bleu scores
+                hypFilepath = os.path.join(working_dir, 'epoch' + str(epoch)) + '_hyp'
+                refFilepath = os.path.join(working_dir, 'epoch' + str(epoch)) + '_ref'
+                bleuFilepath = os.path.join(working_dir, 'epoch' + str(epoch)) + '_bleu'
+                bleuErrFilepath = os.path.join(working_dir, 'epoch' + str(epoch)) + '_bleuERR'
 
                 hypF = open(hypFilepath, "w")
                 refF = open(refFilepath, "w")
@@ -302,21 +305,22 @@ class Trainer(object):
 
                 hypF = open(hypFilepath,'r')
                 bleuF = open(bleuFilepath,'w')
-                FNULL = open(os.devnull, 'w')
+                bleuFERR = open(bleuErrFilepath,'w')
 
                 # run a process to compute BLEU score
-                process = subprocess.Popen(["perl",self.bleuScore, refFilepath], stdin=hypF, stdout=bleuF, stderr=FNULL)
+                process = subprocess.Popen(["perl",self.bleuScore, '-order', str(self.bleuOrder), refFilepath], stdin=hypF, stdout=bleuF, stderr=bleuFERR)
                 process.wait()
                 bleuF.flush()
-                bleuF.write('\n')
                 bleuF.close()
+                bleuFERR.flush()
+                bleuFERR.close()
 
                 bleuF = open(bleuFilepath, 'r')
                 bleu = bleuF.readline().split(' ')
                 self.bleuDev.append(float(bleu[0]))
                 bleuF.close()
 
-                self._logger.info('BLEU on the validation set: %s' % str(bleu[0]))
+                self._logger.info('BLEU on the validation set at epoch %g: %s' % (epoch, str(bleu[0])))
 
                 self._logger.info('Computing BLEU epoch %g... END %.2fs' % (epoch, time.time() - start_time2_epoch))
                 # check if training should continue or not
